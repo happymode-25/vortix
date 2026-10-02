@@ -18,9 +18,11 @@ It must end with `All checks passed.` What each CI job needs locally:
 | Integration / ubuntu-22.04, fedora-41 (`integration-tests.yml`) | Docker only; see [tests/integration](../tests/integration/README.md) |
 | Security Audit (`security.yml`) | `cargo deny check`, not in `ci-local.sh` |
 | Nix flake check (`nix.yml`) | `nix flake check`, not in `ci-local.sh` |
-| Linux packages (`linux-packages.yml`, weekly and on PRs touching the packaging) | none: it packages the latest release with `nfpm` and installs it in Docker |
+| Linux packages (`linux-packages.yml`, weekly and on PRs touching the packaging) | none: it packages the latest release with `nfpm` and installs it in Docker, on amd64 and arm64 |
 
 `ci-local.sh` runs every row up to Integration except the Linux runs of the tests.
+
+The arm64 leg of the Linux packages row needs an arm64 runner, so it has no local equivalent either. `docker run --platform linux/arm64` is the closest approximation — it exercises the same install and the same assertions under QEMU, slowly enough that it is worth running only when you touch `scripts/nfpm.yaml` or the workflow.
 
 ## Traps
 

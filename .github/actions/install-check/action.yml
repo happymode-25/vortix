@@ -1,0 +1,45 @@
+# The install check linux-packages.yml runs on clean distro images, kept as one
+# copy so the amd64 and arm64 legs cannot drift apart.
+#
+#   - Recommends pulls in wireguard-tools and openvpn, as a user's install would,
+#     so the check asserts those arrived too rather than just the binary.
+#   - The package globs are inputs because nfpm names the arch the dpkg/rpm way:
+#     *_amd64.deb / *.x86_64.rpm versus *_arm64.deb / *.aarch64.rpm.
+#   - The globs are expanded by the container's shell, not the runner's, which is
+#     why they arrive quoted and are spliced into the inner command.
+name: 'Install check'
+description: 'Install the .deb and .rpm on clean Ubuntu, Debian and Fedora images and assert the install is usable. Shared by the amd64 and arm64 legs of linux-packages.yml.'
+
+inputs:
+  version:
+    description: 'Release tag to assert against the installed binary, e.g. v0.5.2. The leading v is stripped before matching.'
+    required: true
+  deb:
+    description: 'Path, inside the container, selecting the .deb to install, e.g. /p/vortix_*_amd64.deb'
+    required: true
+  rpm:
+    description: 'Path, inside the container, selecting the .rpm to install, e.g. /p/vortix-*.x86_64.rpm'
+    required: true
+  packages-dir:
+    description: 'Directory on the runner holding the packages; mounted into the containers at /p'
+    required: false
+    default: 'packages'
+
+runs:
+  using: composite
+  steps:
+    - name: Install on Ubuntu 24.04, Debian 12 and Fedora 41
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+        DEB: ${{ inputs.deb }}
+        RPM: ${{ inputs.rpm }}
+        PACKAGES_DIR: ${{ inputs.packages-dir }}
+      run: |
+        check='command -v wg-quick && command -v openvpn && [ "$(command -v vortix)" = /usr/bin/vortix ] && vortix --version | grep -F "${VERSION#v}"'
+        for image in ubuntu:24.04 debian:12; do
+          docker run --rm -e VERSION -v "$PWD/$PACKAGES_DIR:/p" "$image" sh -ec \
+            "apt-get update -qq && apt-get install -y -qq $DEB >/dev/null && $check"
+        done
+        docker run --rm -e VERSION -v "$PWD/$PACKAGES_DIR:/p" fedora:41 sh -ec \
+          "dnf install -y -q $RPM && $check"

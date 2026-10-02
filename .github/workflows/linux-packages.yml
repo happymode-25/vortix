@@ -1,9 +1,10 @@
 name: Linux packages
 
 # Builds .deb and .rpm from a release's musl binaries, installs them on clean
-# distro images, and attaches them to the release. The release workflow calls
-# it after publishing; run it by hand to add packages to an existing release.
-# Weekly and on packaging PRs it checks the latest release without uploading.
+# distro images on both amd64 and arm64, and attaches them to the release. The
+# release workflow calls it after publishing; run it by hand to add packages to
+# an existing release. Weekly and on packaging PRs it checks the latest release
+# without uploading.
 on:
   workflow_call:
     inputs:
@@ -18,9 +19,12 @@ on:
   schedule:
     - cron: "0 6 * * 1"
   pull_request:
+    # The install check lives in the action, so a change to it has to run the
+    # workflow too — otherwise the PR that edits the check cannot show it working.
     paths:
       - "scripts/nfpm.yaml"
       - ".github/workflows/linux-packages.yml"
+      - ".github/actions/install-check/action.yml"
 
 permissions:
   contents: write
@@ -32,6 +36,10 @@ env:
 jobs:
   packages:
     runs-on: ubuntu-24.04
+    # The arm64 leg checks the same release we package here, so the tag has to
+    # leave this job rather than stay in $GITHUB_ENV.
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
@@ -39,6 +47,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Pick the release
+        id: tag
         env:
           PLAN: ${{ inputs.plan }}
           DISPATCH_TAG: ${{ inputs.tag }}
@@ -51,6 +60,7 @@ jobs:
             tag=$(gh release view --repo Harry-kp/vortix --json tagName -q .tagName)
           fi
           echo "TAG=$tag" >> "$GITHUB_ENV"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
       - name: Install nfpm
         run: |
           curl -fsSLo nfpm.tar.gz "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz"
@@ -68,18 +78,50 @@ jobs:
               VERSION="${TAG#v}" ARCH="${pair##*:}" nfpm package --config scripts/nfpm.yaml --packager "$packager" --target packages
             done
           done
-      # Recommends pulls in wireguard-tools and openvpn, as a user's install would.
-      - name: Install on Ubuntu 24.04, Debian 12 and Fedora 41
-        run: |
-          export VERSION="$TAG"
-          check='command -v wg-quick && command -v openvpn && [ "$(command -v vortix)" = /usr/bin/vortix ] && vortix --version | grep -F "${VERSION#v}"'
-          for image in ubuntu:24.04 debian:12; do
-            docker run --rm -e VERSION -v "$PWD/packages:/p" "$image" sh -ec \
-              "apt-get update -qq && apt-get install -y -qq /p/vortix_*_amd64.deb >/dev/null && $check"
-          done
-          docker run --rm -e VERSION -v "$PWD/packages:/p" fedora:41 sh -ec \
-            "dnf install -y -q /p/vortix-*.x86_64.rpm && $check"
+      - name: Install check (amd64)
+        uses: ./.github/actions/install-check
+        with:
+          version: ${{ steps.tag.outputs.tag }}
+          deb: '/p/vortix_*_amd64.deb'
+          rpm: '/p/vortix-*.x86_64.rpm'
       - name: Attach to the release
         # A called workflow sees the caller's event (the tag push), never `workflow_call`.
         if: github.event_name != 'pull_request' && github.event_name != 'schedule'
         run: gh release upload "$TAG" packages/*.deb packages/*.rpm --repo Harry-kp/vortix --clobber
+      # The arm64 leg runs on a different runner, so the packages have to cross
+      # over as an artifact. It reuses the same tag via the job output.
+      - name: Upload packages for the arm64 leg
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-packages
+          path: packages/
+
+  # The arm64 packages were built and attached to every release without ever
+  # being installed, so a broken one shipped silently. Same check, arm runner.
+  #
+  # ubuntu-24.04-arm is free in public repos and still public preview: longer
+  # queues than x64, and the label hard-fails if this repo ever goes private.
+  packages-arm64:
+    runs-on: ubuntu-24.04-arm
+    # The workflow grants contents: write so the packages job can attach them to a
+    # release; this job only reads.
+    permissions:
+      contents: read
+    needs: packages
+    steps:
+      # The install check is a local composite action, so it cannot be resolved
+      # on disk until the repo is checked out.
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Download packages
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-packages
+          path: packages
+      - name: Install check (arm64)
+        uses: ./.github/actions/install-check
+        with:
+          version: ${{ needs.packages.outputs.tag }}
+          deb: '/p/vortix_*_arm64.deb'
+          rpm: '/p/vortix-*.aarch64.rpm'
